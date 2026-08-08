@@ -16,6 +16,14 @@
 pipeline {
     agent any
 
+    options {
+        // Cluster only has 2 small workers; concurrent Kaniko builds from
+        // overlapping runs (e.g. impatient re-triggers, or pollSCM firing
+        // while a build is still running) can starve each other for
+        // RAM/CPU. Queue instead of running in parallel.
+        disableConcurrentBuilds()
+    }
+
     environment {
         NEXUS_REGISTRY  = "nexus-service.cicd.svc.cluster.local:8082"
         BACKEND_IMAGE   = "ehealth-backend"
@@ -93,11 +101,33 @@ spec:
                 path: config.json
 EOF
                         kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/kaniko-backend-${BUILD_NUMBER}.yaml
-                        kubectl --kubeconfig=$KUBECONFIG wait --for=condition=complete \
-                            job/kaniko-backend-${BUILD_NUMBER} -n cicd --timeout=600s \
-                        || { echo "--- Kaniko backend build failed, logs: ---"; \
-                             kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/kaniko-backend-${BUILD_NUMBER} --all-containers; \
-                             exit 1; }
+
+                        # `kubectl wait --for=condition=complete` never fires on a
+                        # Failed job (it just waits for Complete=True until timeout),
+                        # and by the time it did time out the failed Job had already
+                        # been garbage-collected by ttlSecondsAfterFinished, so logs
+                        # were gone. Poll explicitly for either Complete or Failed
+                        # instead, so we catch it (and grab logs) right away.
+                        JOB=kaniko-backend-${BUILD_NUMBER}
+                        for i in $(seq 1 90); do
+                            COMPLETE=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
+                            FAILED=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+                            if [ "$COMPLETE" = "True" ]; then
+                                echo "Backend build succeeded."
+                                break
+                            fi
+                            if [ "$FAILED" = "True" ]; then
+                                echo "--- Kaniko backend build failed, logs: ---"
+                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
+                                exit 1
+                            fi
+                            sleep 10
+                            if [ "$i" = "90" ]; then
+                                echo "--- Kaniko backend build timed out after 900s, logs: ---"
+                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
+                                exit 1
+                            fi
+                        done
                     '''
                 }
             }
@@ -151,11 +181,27 @@ spec:
                 path: config.json
 EOF
                         kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/kaniko-frontend-${BUILD_NUMBER}.yaml
-                        kubectl --kubeconfig=$KUBECONFIG wait --for=condition=complete \
-                            job/kaniko-frontend-${BUILD_NUMBER} -n cicd --timeout=600s \
-                        || { echo "--- Kaniko frontend build failed, logs: ---"; \
-                             kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/kaniko-frontend-${BUILD_NUMBER} --all-containers; \
-                             exit 1; }
+
+                        JOB=kaniko-frontend-${BUILD_NUMBER}
+                        for i in $(seq 1 90); do
+                            COMPLETE=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
+                            FAILED=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+                            if [ "$COMPLETE" = "True" ]; then
+                                echo "Frontend build succeeded."
+                                break
+                            fi
+                            if [ "$FAILED" = "True" ]; then
+                                echo "--- Kaniko frontend build failed, logs: ---"
+                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
+                                exit 1
+                            fi
+                            sleep 10
+                            if [ "$i" = "90" ]; then
+                                echo "--- Kaniko frontend build timed out after 900s, logs: ---"
+                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
+                                exit 1
+                            fi
+                        done
                     '''
                 }
             }
