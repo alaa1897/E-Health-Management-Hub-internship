@@ -1,0 +1,18 @@
+# Sized down from the brief's 10Gi: k8s-worker1/2 root disks (17G each) only have
+# ~3.5-4.8Gi free (confirmed via `df -h /var/lib/longhorn/`, 2026-08-08) once the OS,
+# k8s system pods, and existing jenkins-pvc/postgres-pvc replicas are accounted for.
+# A 10Gi request left Longhorn unable to schedule any replica at all (0 replicas
+# created, volume stuck "faulted"/"detached"). 3Gi fits comfortably on both nodes and
+# is enough for Nexus's own metadata plus a handful of small image layers/tags.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-pvc
+  namespace: cicd
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 3Gi

@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nexus-ingress
+  namespace: cicd
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"  # nécessaire pour les gros pushes d'images
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: nexus.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nexus-service
+                port:
+                  number: 8081

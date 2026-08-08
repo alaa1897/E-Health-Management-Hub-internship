@@ -1,0 +1,75 @@
+# NOTE (deviation from brief's Option A / Piège 12):
+# Workers have neither `docker` nor `nerdctl` installed (confirmed via SSH check on
+# k8s-worker1/2, 2026-08-08), only bare containerd, and each worker has <2Gi total RAM.
+# Mounting /var/run/docker.sock as in the brief's template is not possible (no daemon
+# to talk to), and installing a full dockerd on both workers would eat RAM permanently
+# even when idle. Instead: Jenkins gets kubectl only (still via initContainer, Piège 4
+# Option A). Actual image builds are delegated to short-lived Kaniko Jobs, launched by
+# the Jenkinsfile via `kubectl apply` against this same cluster (see k8s/cicd/kaniko-*
+# templates and the Jenkinsfile). Kaniko needs no daemon and only consumes RAM while a
+# build is actually running.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: cicd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+      initContainers:
+        # Piège 4 — jenkins/jenkins:lts does not ship kubectl.
+        - name: install-kubectl
+          image: alpine:latest
+          # Pod-level securityContext below (runAsUser 1000) applies to every container
+          # by default, including initContainers. Alpine's `apk add` needs root, so this
+          # initContainer overrides back to UID 0 for itself only.
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              apk add --no-cache curl && \
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" && \
+              chmod +x kubectl && mv kubectl /tools/kubectl
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+      containers:
+        - name: jenkins
+          image: jenkins/jenkins:lts
+          env:
+            - name: JAVA_OPTS
+              value: "-Xmx512m -Xms256m"   # Piège 2
+          ports:
+            - containerPort: 8080
+            - containerPort: 50000
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "400Mi"
+            limits:
+              cpu: "1"
+              memory: "768Mi"
+          volumeMounts:
+            - name: jenkins-data
+              mountPath: /var/jenkins_home
+            - name: tools
+              mountPath: /usr/local/bin/kubectl
+              subPath: kubectl
+      volumes:
+        - name: jenkins-data
+          persistentVolumeClaim:
+            claimName: jenkins-pvc
+        - name: tools
+          emptyDir: {}

@@ -1,2 +1,4 @@
-*.sql
 /.vscode
+internship-alaa-backend.tar.gz
+internship-alaa-frontend.tar.gz
+k8s/ehealth/database-secret.yaml

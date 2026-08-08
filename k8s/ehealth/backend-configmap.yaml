@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: ehealth
+data:
+  PG_HOST: postgres-service
+  PG_PORT: "5432"
+  PG_DATABASE: healthcare
+  PG_USER: postgres
+  port: "3001"

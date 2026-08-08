@@ -1,11 +1,12 @@
 import * as types from "./types";
 import axios from "axios";
+import { API_BASE_URL } from "../../config";
 
 // CreateReport
 export const CreateReport = (data) => async (dispatch) => {
   try {
     dispatch({ type: types.CREATE_REPORT_REQUEST });
-    const res = await axios.post("http://127.0.0.1:3001/reports/create", data);
+    const res = await axios.post(`${API_BASE_URL}/reports/create`, data);
     console.log(res);
     return res.data;
     // dispatch({
@@ -28,7 +29,7 @@ export const CreateReport = (data) => async (dispatch) => {
 export const GetDoctorDetails = () => async (dispatch) => {
   try {
     dispatch({ type: types.GET_DOCTOR_REQUEST });
-    const res = await axios.get("http://127.0.0.1:3001/doctors");
+    const res = await axios.get(`${API_BASE_URL}/doctors`);
     console.log("this", res);
     const doctors = { doctors: res.data };
     dispatch({
@@ -48,7 +49,7 @@ export const GetDoctorDetails = () => async (dispatch) => {
 export const GetAdminDetails = () => async (dispatch) => {
   try {
     dispatch({ type: types.GET_ADMIN_REQUEST });
-    const res = await axios.get("http://127.0.0.1:3001/admin");
+    const res = await axios.get(`${API_BASE_URL}/admin`);
     console.log(res.data);
     const admins = { admins: res.data };
     dispatch({
@@ -69,7 +70,7 @@ export const GetMedicineDetails = (patientid) => async (dispatch) => {
   try {
     dispatch({ type: types.GET_MEDICINE_REQUEST });
     const res = await axios.post(
-      `http://127.0.0.1:3001/prescriptions/${patientid}`
+      `${API_BASE_URL}/prescriptions/${patientid}`
     );
     //axios.post
     console.log(res.data);
@@ -88,7 +89,7 @@ export const CreateBooking = (data) => async (dispatch) => {
   try {
     dispatch({ type: types.CREATE_BOOKING_REQUEST });
     const res = await axios.post(
-      `http://127.0.0.1:3001/appointments/create`,
+      `${API_BASE_URL}/appointments/create`,
       data
     );
     console.log(res);
@@ -103,7 +104,7 @@ export const CreateBooking = (data) => async (dispatch) => {
 export const GetPatients = () => async (dispatch) => {
   try {
     dispatch({ type: types.GET_PATIENT_REQUEST });
-    const res = await axios.get(`http://127.0.0.1:3001/patients`);
+    const res = await axios.get(`${API_BASE_URL}/patients`);
     console.log("pats", res);
     const patients = { patients: res.data };
     dispatch({
@@ -124,7 +125,7 @@ export const GetPatients = () => async (dispatch) => {
 export const GetAllData = () => async (dispatch) => {
   try {
     dispatch({ type: types.GET_ALLDATA_REQUEST });
-    const res = await axios.get(`http://127.0.0.1:3001/hospitals`);
+    const res = await axios.get(`${API_BASE_URL}/hospitals`);
     console.log(res.data);
     dispatch({
       type: types.GET_ALLDATA_SUCCESS,
@@ -140,7 +141,7 @@ export const GetAppointments = (userType, id) => async (dispatch) => {
   try {
     dispatch({ type: types.GET_APPOINTMENT_DETAILS_REQUEST });
     const res = await axios.get(
-      `http://127.0.0.1:3001/appointments/${userType}/${id}`
+      `${API_BASE_URL}/appointments/${userType}/${id}`
     );
     console.log("res", res.data);
     // return res.data;
@@ -158,7 +159,7 @@ export const GetAppointments = (userType, id) => async (dispatch) => {
 export const DeleteAppointment = (id) => async (dispatch) => {
   try {
     dispatch({ type: types.DELETE_APPOINTMENT_REQUEST });
-    const res = await axios.delete(`http://127.0.0.1:3001/appointments/${id}`);
+    const res = await axios.delete(`${API_BASE_URL}/appointments/${id}`);
     console.log(res.data);
     // return res.data;
     dispatch({
@@ -176,7 +177,7 @@ export const GetAllReports = (userType, id) => async (dispatch) => {
     console.log("action :", userType, id);
     dispatch({ type: types.GET_REPORTS_REQUEST });
     const res = await axios.get(
-      `http://127.0.0.1:3001/reports/${userType}/${id}`
+      `${API_BASE_URL}/reports/${userType}/${id}`
     );
     console.log("res", res.data);
     const reports = { reports: res.data.data };

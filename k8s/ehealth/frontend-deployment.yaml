@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: ehealth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      imagePullSecrets:
+        - name: nexus-pull-secret
+      containers:
+        - name: frontend
+          image: nexus-service.cicd.svc.cluster.local:8082/ehealth-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
