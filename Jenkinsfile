@@ -71,6 +71,11 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Nexus is dedicated to worker2 (see nexus-deployment.yaml) precisely so
+      # it's never competing with a build. Kaniko builds go on worker1
+      # alongside Jenkins and the ehealth app pods instead.
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:latest
@@ -150,6 +155,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:latest
@@ -168,7 +175,10 @@ spec:
               memory: "256Mi"
             limits:
               cpu: "1"
-              memory: "1Gi"
+              # Was 1Gi; got OOMKilled while sharing worker2 with Nexus.
+              # Now pinned to worker1 (away from Nexus) with a bit more
+              # headroom for the React/webpack build.
+              memory: "1280Mi"
           volumeMounts:
             - name: docker-config
               mountPath: /kaniko/.docker
