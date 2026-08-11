@@ -36,11 +36,15 @@ pipeline {
         KANIKO_CONTEXT  = "git://github.com/alaa1897/E-Health-Management-Hub-internship.git#refs/heads/main"
     }
 
-    //triggers {
-        // Piège 8 — Jenkins isn't exposed to the internet, so GitHub can't webhook
-        // it. Polling every minute is the documented workaround.
-       // pollSCM('* * * * *')
-    //}
+    // triggers { pollSCM('* * * * *') }
+    // Piège 8 — Jenkins isn't exposed to the internet, so GitHub can't webhook it;
+    // polling is the documented workaround. TEMPORARILY DISABLED: repeated manual
+    // build aborts during troubleshooting appear to have corrupted Jenkins' SCM
+    // polling bookkeeping, causing every poll to perceive a "change" and fire a
+    // new concurrent build (disableConcurrentBuilds() below never got a chance to
+    // register either, since no run had completed cleanly). Builds are triggered
+    // manually via "Build Now" only until one clean run resets the baseline, at
+    // which point this trigger can be safely uncommented again.
 
     stages {
         stage('Checkout') {
@@ -169,6 +173,16 @@ spec:
             - --insecure
             - --skip-tls-verify
             - --verbosity=info
+            # Node's node_modules tree (1590+ packages) was pushing Kaniko's
+            # default full-content-hash snapshotter over worker1's available
+            # RAM (confirmed via dmesg: kernel OOM-killed the `executor`
+            # process mid-snapshot, right after `npm ci`, even before
+            # `npm run build` ran). --snapshot-mode=time switches to cheap
+            # mtime-based change detection instead of hashing file contents,
+            # and --use-new-run uses more memory-efficient overlay diffing
+            # for RUN steps.
+            - --snapshot-mode=time
+            - --use-new-run=true
           resources:
             requests:
               cpu: "250m"
