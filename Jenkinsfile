@@ -36,11 +36,11 @@ pipeline {
         KANIKO_CONTEXT  = "git://github.com/alaa1897/E-Health-Management-Hub-internship.git#refs/heads/main"
     }
 
-    triggers {
+    //triggers {
         // Piège 8 — Jenkins isn't exposed to the internet, so GitHub can't webhook
         // it. Polling every minute is the documented workaround.
-        pollSCM('* * * * *')
-    }
+       // pollSCM('* * * * *')
+    //}
 
     stages {
         stage('Checkout') {
