@@ -1,5 +1,4 @@
 # Stage 1: build
-# Stage 1: build
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
@@ -8,7 +7,7 @@ COPY . .
 ARG REACT_APP_API_URL
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
 ENV GENERATE_SOURCEMAP=false
-ENV NODE_OPTIONS=--max-old-space-size=768
+ENV NODE_OPTIONS=--max-old-space-size=1536
 RUN npm run build
 
 # Stage 2: serve with Nginx
