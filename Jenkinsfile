@@ -192,7 +192,7 @@ spec:
               # Was 1Gi; got OOMKilled while sharing worker2 with Nexus.
               # Now pinned to worker1 (away from Nexus) with a bit more
               # headroom for the React/webpack build.
-              memory: "1280Mi"
+              memory: "2048Mi"
           volumeMounts:
             - name: docker-config
               mountPath: /kaniko/.docker
