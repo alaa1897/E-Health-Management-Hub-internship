@@ -86,6 +86,36 @@ pipeline {
                 git credentialsId: 'github-credentials',
                     url: "${GITHUB_URL}",
                     branch: 'main'
+
+                // TASK 5 FIX (worker1 OOM, confirmed live 2026-08-19 via
+                // dmesg — see the matching comment on Quality Gate below for
+                // the other half of this). worker1 has ~5.3Gi of real RAM.
+                // Jenkins (1024Mi limit) + SonarQube (2Gi limit, resident
+                // 24/7) alone commit ~3Gi of *limits* before a single build
+                // step runs. When Kaniko's frontend Job (3072Mi limit) needs
+                // its own peak during "Build Docker Images", the node runs
+                // out of real memory and the kernel OOM-killer sweeps
+                // several processes at once — confirmed live: `node`,
+                // Kaniko's own `executor` process, and `npm run build` were
+                // all killed in the same instant.
+                //
+                // Fix: SonarQube is only actually needed for the "SonarQube
+                // Analysis" / "Quality Gate" stages — nothing after that
+                // (Build Docker Images, Trivy, push, deploy) ever talks to
+                // it. So scale it UP here, at the very start (this also
+                // self-heals if a previous run aborted after scaling it
+                // down), then scale it back DOWN to 0 right after the
+                // Quality Gate passes, handing its ~1-2Gi of real memory
+                // back to worker1 before Kaniko needs it. Doing the scale-up
+                // this early gives SonarQube's slow Elasticsearch startup
+                // (2-3 min) the whole Build Frontend + Build Backend window
+                // to finish before SonarQube Analysis actually needs it.
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        set -e
+                        kubectl --kubeconfig=$KUBECONFIG scale deployment/sonarqube -n cicd --replicas=1
+                    '''
+                }
             }
         }
 
@@ -129,11 +159,21 @@ pipeline {
         // sonar-scanner natively (see jenkins-deployment.yaml) so
         // .scannerwork/report-task.txt lands in this same workspace, which
         // Quality Gate needs.
+        // CORRECTED (caught live, 2026-08-19): neither sh block below
+        // originally exported PATH, so sonar-scanner's JS/TS analyzer
+        // sensor couldn't find `node` ("Error when running: 'node -v'. Is
+        // Node.js available during analysis?") and silently SKIPPED
+        // JS/TS-specific rules for both projects — the scan still uploaded
+        // and the Quality Gate still "passed", just on materially
+        // incomplete analysis for a Node.js/React codebase. Fixed the same
+        // way the npm shebang issue was fixed earlier: export PATH scoped
+        // to just this shell step.
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonarqube') {
                     sh '''
                         set -e
+                        export PATH="/opt/tools/node/bin:$PATH"
                         cd Backend
                         /opt/tools/sonar-scanner/bin/sonar-scanner \
                           -Dsonar.projectKey=ehealth-backend \
@@ -143,6 +183,7 @@ pipeline {
                     '''
                     sh '''
                         set -e
+                        export PATH="/opt/tools/node/bin:$PATH"
                         cd FrontEnd
                         /opt/tools/sonar-scanner/bin/sonar-scanner \
                           -Dsonar.projectKey=ehealth-frontend \
@@ -164,6 +205,26 @@ pipeline {
                     timeout(time: 5, unit: 'MINUTES') {
                         waitForQualityGate abortPipeline: true
                     }
+                }
+
+                // TASK 5 FIX — see the matching comment on Checkout above.
+                // We only reach this line if BOTH gates passed
+                // (abortPipeline: true throws immediately on failure, which
+                // also means: if the gate fails, we skip this and SonarQube
+                // stays scaled up — harmless, since Kaniko never runs in
+                // that case either). SonarQube is done being useful for this
+                // run, so scale it to 0 and actually WAIT for the pod to
+                // terminate — `kubectl scale` returns immediately, but the
+                // JVM+ES process takes a few seconds to actually release its
+                // memory back to worker1, and that memory needs to be free
+                // *before* the Kaniko frontend Job starts in the very next
+                // stage, not racing it.
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        set -e
+                        kubectl --kubeconfig=$KUBECONFIG scale deployment/sonarqube -n cicd --replicas=0
+                        kubectl --kubeconfig=$KUBECONFIG wait --for=delete pod -l app=sonarqube -n cicd --timeout=60s || true
+                    '''
                 }
             }
         }
