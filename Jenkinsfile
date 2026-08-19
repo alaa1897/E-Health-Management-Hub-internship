@@ -89,9 +89,20 @@ pipeline {
             }
         }
 
-        // "Build" here = compile/dependency-install sanity check on source
-        // code — no Docker image yet. Runs natively in the Jenkins pod using
-        // the Node.js installed by the install-node initContainer.
+        // "Build" here = dependency-install sanity check on source code — no
+        // Docker image yet. Runs natively in the Jenkins pod using the
+        // Node.js installed by the install-node initContainer.
+        //
+        // CORRECTED (caught live, 2026-08-19): this stage originally also
+        // ran the full `npm run build` (webpack bundle) with
+        // NODE_OPTIONS=--max-old-space-size=1536 — Jenkins' own pod only has
+        // a 768Mi memory limit (Piège 2), so that OOMKilled Jenkins itself
+        // outright (exit 137). The full production build already gets
+        // validated for real later, inside Kaniko's Job, which has its own
+        // dedicated 3072Mi (the same number Task 4 already had to raise it
+        // to for this exact reason). Running it twice was both wasteful and,
+        // on this cluster's memory budget, actively unsafe — `npm ci` alone
+        // is a legitimate and much lighter "does this even install" gate.
         stage('Build Frontend') {
             steps {
                 sh '''
@@ -99,11 +110,6 @@ pipeline {
                     export PATH="/opt/tools/node/bin:$PATH"
                     cd FrontEnd
                     npm ci
-                    GENERATE_SOURCEMAP=false \
-                    NODE_OPTIONS=--max-old-space-size=1536 \
-                    REACT_APP_API_URL=${REACT_APP_API_URL} \
-                    CI=false \
-                    npm run build
                 '''
             }
         }
