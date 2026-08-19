@@ -1,64 +1,168 @@
-// Task 4 — CI/CD Pipeline: Jenkins + Nexus
+// Task 5 — SonarQube + Trivy in the Jenkins pipeline.
 //
-// DEVIATION FROM BRIEF (documented per Piège 8's "choix d'architecture" note):
-// The brief's original Jenkinsfile assumes `docker build`/`docker push` via a
-// docker.sock mount (Piège 12, Option A). k8s-worker1/worker2 were confirmed
-// (2026-08-08) to have neither `docker` nor `nerdctl` installed, only bare
-// containerd, and both are RAM-constrained (<2Gi each). Rather than install a
-// permanent dockerd on the hosts, image builds are delegated to short-lived
-// Kaniko Jobs launched via `kubectl` (already required for the Deploy stage,
-// reusing the same `kubeconfig` credential). Kaniko needs no daemon and only
-// consumes resources while a build is actually running — a better fit for
-// this cluster's resource budget. Build + push happen atomically inside each
-// Kaniko Job, so there's no separate "Push to Nexus" stage like the brief's
-// template.
+// Builds directly on Task 4's Jenkinsfile (Kaniko-via-kubectl-Job, no Docker
+// socket anywhere on the cluster). Same deviation rationale applies here for
+// every new stage: no dockerd/nerdctl on the workers, so anything that used
+// to be "docker run some-tool" is either (a) a native binary installed into
+// the Jenkins pod via initContainer (see k8s/cicd/jenkins-deployment.yaml —
+// this is how sonar-scanner and node/npm are available below), or (b) a
+// short-lived Kubernetes Job launched the same way Kaniko already is.
+//
+// Mentor's imposed order (all 10 stages present, same names/order):
+//   1 Checkout  2 Build Frontend  3 Build Backend  4 SonarQube Analysis
+//   5 Quality Gate  6 Build Docker Images  7 Security Scan (Trivy)
+//   8 Push Validated Images  9 Deploy to Kubernetes  10 Verify Application
+//
+// Piège 4 decision: OPTION C (staging tag). Kaniko pushes each image to
+// ":staging-${BUILD_NUMBER}" only. Trivy scans that tag straight from Nexus.
+// If it passes, a `crane` Job re-points ":${BUILD_NUMBER}" and ":latest" at
+// the same manifest server-side (no rebuild, no re-upload of layers) — this
+// avoids the shared-tarball-volume plumbing Option A would need between two
+// separate ephemeral Job pods, and matches how Task 4 already pushes.
+//
+// SonarQube Quality Gate note (not covered by the brief): `waitForQualityGate`
+// needs SonarQube to call back to Jenkins. Configure a webhook in SonarQube
+// (Administration → Configuration → Webhooks) pointing at
+// http://jenkins-service.cicd.svc.cluster.local:8080/sonarqube-webhook/
+// (trailing slash required) BEFORE running this pipeline for the first time,
+// or the Quality Gate stage will likely hang until the 5-minute timeout even
+// on a project that actually passed — this is almost certainly what Piège 5
+// is actually describing.
+
+def waitForJobCompletion(String jobName, String namespace, int maxIterations) {
+    sh """
+        set -e
+        JOB=${jobName}
+        NS=${namespace}
+        i=0
+        while [ \$i -lt ${maxIterations} ]; do
+            COMPLETE=\$(kubectl --kubeconfig=\$KUBECONFIG get job/\$JOB -n \$NS -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
+            FAILED=\$(kubectl --kubeconfig=\$KUBECONFIG get job/\$JOB -n \$NS -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+            if [ "\$COMPLETE" = "True" ]; then
+                echo ">>> Job \$JOB succeeded."
+                kubectl --kubeconfig=\$KUBECONFIG logs -n \$NS job/\$JOB --all-containers || true
+                exit 0
+            fi
+            if [ "\$FAILED" = "True" ]; then
+                echo "--- Job \$JOB FAILED, logs: ---"
+                kubectl --kubeconfig=\$KUBECONFIG logs -n \$NS job/\$JOB --all-containers
+                exit 1
+            fi
+            sleep 10
+            i=\$((i+1))
+        done
+        echo "--- Job \$JOB timed out after ${maxIterations * 10}s, logs: ---"
+        kubectl --kubeconfig=\$KUBECONFIG logs -n \$NS job/\$JOB --all-containers || true
+        exit 1
+    """
+}
 
 pipeline {
     agent any
 
     options {
-        // Cluster only has 2 small workers; concurrent Kaniko builds from
-        // overlapping runs (e.g. impatient re-triggers, or pollSCM firing
-        // while a build is still running) can starve each other for
-        // RAM/CPU. Queue instead of running in parallel.
         disableConcurrentBuilds()
     }
 
     environment {
-        NEXUS_REGISTRY  = "nexus-service.cicd.svc.cluster.local:8082"
-        BACKEND_IMAGE   = "ehealth-backend"
-        FRONTEND_IMAGE  = "ehealth-frontend"
-        // Piège 5 — value the BROWSER uses (resolves via /etc/hosts on the Mac),
-        // not a cluster-internal address. Must exactly match what Task 3 baked in.
+        NEXUS_REGISTRY   = "nexus-service.cicd.svc.cluster.local:8082"
+        BACKEND_IMAGE    = "ehealth-backend"
+        FRONTEND_IMAGE   = "ehealth-frontend"
         REACT_APP_API_URL = "http://api.ehealth.local"
-        GITHUB_URL      = "https://github.com/alaa1897/E-Health-Management-Hub-internship.git"
-        // Kaniko's git-context syntax needs the git:// form with an explicit ref.
-        KANIKO_CONTEXT  = "git://github.com/alaa1897/E-Health-Management-Hub-internship.git#refs/heads/main"
+        GITHUB_URL       = "https://github.com/alaa1897/E-Health-Management-Hub-internship.git"
+        KANIKO_CONTEXT   = "git://github.com/alaa1897/E-Health-Management-Hub-internship.git#refs/heads/main"
+        SONAR_HOST_URL   = "http://sonarqube-service.cicd.svc.cluster.local:9000"
+        STAGING_TAG      = "staging-${BUILD_NUMBER}"
     }
 
     // triggers { pollSCM('* * * * *') }
-    // Piège 8 — Jenkins isn't exposed to the internet, so GitHub can't webhook it;
-    // polling is the documented workaround. TEMPORARILY DISABLED: repeated manual
-    // build aborts during troubleshooting appear to have corrupted Jenkins' SCM
-    // polling bookkeeping, causing every poll to perceive a "change" and fire a
-    // new concurrent build (disableConcurrentBuilds() below never got a chance to
-    // register either, since no run had completed cleanly). Builds are triggered
-    // manually via "Build Now" only until one clean run resets the baseline, at
-    // which point this trigger can be safely uncommented again.
+    // Still commented out per Task 4's note — re-enable once a few clean
+    // Task 5 runs have gone through via "Build Now".
 
     stages {
+
         stage('Checkout') {
             steps {
-                // Repo is public, so credentialsId isn't strictly required for the
-                // clone itself, but kept for consistency with Jenkins Credentials
-                // setup (Piège 9) and in case the repo ever goes private.
                 git credentialsId: 'github-credentials',
                     url: "${GITHUB_URL}",
                     branch: 'main'
             }
         }
 
-        stage('Build & Push Backend (Kaniko)') {
+        // "Build" here = compile/dependency-install sanity check on source
+        // code — no Docker image yet. Runs natively in the Jenkins pod using
+        // the Node.js installed by the install-node initContainer.
+        stage('Build Frontend') {
+            steps {
+                sh '''
+                    set -e
+                    cd FrontEnd
+                    /opt/tools/node/bin/npm ci
+                    GENERATE_SOURCEMAP=false \
+                    NODE_OPTIONS=--max-old-space-size=1536 \
+                    REACT_APP_API_URL=${REACT_APP_API_URL} \
+                    CI=false \
+                    /opt/tools/node/bin/npm run build
+                '''
+            }
+        }
+
+        stage('Build Backend') {
+            steps {
+                sh '''
+                    set -e
+                    cd Backend
+                    /opt/tools/node/bin/npm ci
+                '''
+            }
+        }
+
+        // Two separate SonarQube projects (backend, frontend). Runs
+        // sonar-scanner natively (see jenkins-deployment.yaml) so
+        // .scannerwork/report-task.txt lands in this same workspace, which
+        // Quality Gate needs.
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    sh '''
+                        set -e
+                        cd Backend
+                        /opt/tools/sonar-scanner/bin/sonar-scanner \
+                          -Dsonar.projectKey=ehealth-backend \
+                          -Dsonar.projectName="E-Health Backend" \
+                          -Dsonar.sources=. \
+                          -Dsonar.exclusions=node_modules/**
+                    '''
+                    sh '''
+                        set -e
+                        cd FrontEnd
+                        /opt/tools/sonar-scanner/bin/sonar-scanner \
+                          -Dsonar.projectKey=ehealth-frontend \
+                          -Dsonar.projectName="E-Health Frontend" \
+                          -Dsonar.sources=src
+                    '''
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                dir('Backend') {
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+                dir('FrontEnd') {
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+            }
+        }
+
+        // Piège 4 / Option C — build + push to a throwaway ":staging-N" tag
+        // only. Nothing under ":latest" or ":N" exists in Nexus yet.
+        stage('Build Docker Images') {
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh '''
@@ -75,9 +179,6 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # Nexus is dedicated to worker2 (see nexus-deployment.yaml) precisely so
-      # it's never competing with a build. Kaniko builds go on worker1
-      # alongside Jenkins and the ehealth app pods instead.
       nodeSelector:
         kubernetes.io/hostname: k8s-worker1
       containers:
@@ -86,8 +187,7 @@ spec:
           args:
             - --context=${KANIKO_CONTEXT}
             - --context-sub-path=Backend
-            - --destination=${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${BUILD_NUMBER}
-            - --destination=${NEXUS_REGISTRY}/${BACKEND_IMAGE}:latest
+            - --destination=${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG}
             - --insecure
             - --skip-tls-verify
             - --verbosity=info
@@ -110,41 +210,9 @@ spec:
                 path: config.json
 EOF
                         kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/kaniko-backend-${BUILD_NUMBER}.yaml
-
-                        # `kubectl wait --for=condition=complete` never fires on a
-                        # Failed job (it just waits for Complete=True until timeout),
-                        # and by the time it did time out the failed Job had already
-                        # been garbage-collected by ttlSecondsAfterFinished, so logs
-                        # were gone. Poll explicitly for either Complete or Failed
-                        # instead, so we catch it (and grab logs) right away.
-                        JOB=kaniko-backend-${BUILD_NUMBER}
-                        for i in $(seq 1 90); do
-                            COMPLETE=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
-                            FAILED=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
-                            if [ "$COMPLETE" = "True" ]; then
-                                echo "Backend build succeeded."
-                                break
-                            fi
-                            if [ "$FAILED" = "True" ]; then
-                                echo "--- Kaniko backend build failed, logs: ---"
-                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
-                                exit 1
-                            fi
-                            sleep 10
-                            if [ "$i" = "90" ]; then
-                                echo "--- Kaniko backend build timed out after 900s, logs: ---"
-                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
-                                exit 1
-                            fi
-                        done
                     '''
-                }
-            }
-        }
+                    waitForJobCompletion('kaniko-backend-${BUILD_NUMBER}', 'cicd', 90)
 
-        stage('Build & Push Frontend (Kaniko)') {
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
                     sh '''
                         set -e
                         cat <<EOF > /tmp/kaniko-frontend-${BUILD_NUMBER}.yaml
@@ -168,19 +236,10 @@ spec:
             - --context=${KANIKO_CONTEXT}
             - --context-sub-path=FrontEnd
             - --build-arg=REACT_APP_API_URL=${REACT_APP_API_URL}
-            - --destination=${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${BUILD_NUMBER}
-            - --destination=${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:latest
+            - --destination=${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${STAGING_TAG}
             - --insecure
             - --skip-tls-verify
             - --verbosity=info
-            # Node's node_modules tree (1590+ packages) was pushing Kaniko's
-            # default full-content-hash snapshotter over worker1's available
-            # RAM (confirmed via dmesg: kernel OOM-killed the `executor`
-            # process mid-snapshot, right after `npm ci`, even before
-            # `npm run build` ran). --snapshot-mode=time switches to cheap
-            # mtime-based change detection instead of hashing file contents,
-            # and --use-new-run uses more memory-efficient overlay diffing
-            # for RUN steps.
             - --snapshot-mode=time
             - --use-new-run=true
           resources:
@@ -189,9 +248,6 @@ spec:
               memory: "256Mi"
             limits:
               cpu: "1"
-              # Was 1Gi; got OOMKilled while sharing worker2 with Nexus.
-              # Now pinned to worker1 (away from Nexus) with a bit more
-              # headroom for the React/webpack build.
               memory: "3072Mi"
           volumeMounts:
             - name: docker-config
@@ -205,28 +261,186 @@ spec:
                 path: config.json
 EOF
                         kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/kaniko-frontend-${BUILD_NUMBER}.yaml
-
-                        JOB=kaniko-frontend-${BUILD_NUMBER}
-                        for i in $(seq 1 90); do
-                            COMPLETE=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
-                            FAILED=$(kubectl --kubeconfig=$KUBECONFIG get job/$JOB -n cicd -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
-                            if [ "$COMPLETE" = "True" ]; then
-                                echo "Frontend build succeeded."
-                                break
-                            fi
-                            if [ "$FAILED" = "True" ]; then
-                                echo "--- Kaniko frontend build failed, logs: ---"
-                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
-                                exit 1
-                            fi
-                            sleep 10
-                            if [ "$i" = "90" ]; then
-                                echo "--- Kaniko frontend build timed out after 900s, logs: ---"
-                                kubectl --kubeconfig=$KUBECONFIG logs -n cicd job/$JOB --all-containers
-                                exit 1
-                            fi
-                        done
                     '''
+                    waitForJobCompletion('kaniko-frontend-${BUILD_NUMBER}', 'cicd', 90)
+                }
+            }
+        }
+
+        // Piège 8 — Nexus is HTTP-only, Trivy needs --insecure + creds.
+        // Piège 9 — exit-code 0 for now (see Jenkinsfile comment below);
+        // flip to 1 --severity CRITICAL once you and your mentor have
+        // reviewed a baseline report together.
+        stage('Security Scan — Trivy') {
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS'),
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')
+                ]) {
+                    sh '''
+                        set -e
+                        kubectl --kubeconfig=$KUBECONFIG create secret generic nexus-registry-creds \
+                          -n cicd \
+                          --from-literal=username=$NEXUS_USER \
+                          --from-literal=password=$NEXUS_PASS \
+                          --dry-run=client -o yaml | kubectl --kubeconfig=$KUBECONFIG apply -f -
+                    '''
+                }
+
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        set -e
+                        cat <<EOF > /tmp/trivy-backend-${BUILD_NUMBER}.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trivy-backend-${BUILD_NUMBER}
+  namespace: cicd
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
+      containers:
+        - name: trivy
+          image: aquasec/trivy:latest
+          env:
+            - name: TRIVY_USERNAME
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: username }
+            - name: TRIVY_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: password }
+          args:
+            - image
+            - --insecure
+            - --exit-code
+            - "0"
+            - --severity
+            - HIGH,CRITICAL
+            - --format
+            - table
+            - ${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG}
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: /root/.cache/trivy
+      volumes:
+        - name: trivy-cache
+          persistentVolumeClaim:
+            claimName: trivy-cache-pvc
+EOF
+                        kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/trivy-backend-${BUILD_NUMBER}.yaml
+                    '''
+                    waitForJobCompletion('trivy-backend-${BUILD_NUMBER}', 'cicd', 60)
+
+                    sh '''
+                        set -e
+                        cat <<EOF > /tmp/trivy-frontend-${BUILD_NUMBER}.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trivy-frontend-${BUILD_NUMBER}
+  namespace: cicd
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
+      containers:
+        - name: trivy
+          image: aquasec/trivy:latest
+          env:
+            - name: TRIVY_USERNAME
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: username }
+            - name: TRIVY_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: password }
+          args:
+            - image
+            - --insecure
+            - --exit-code
+            - "0"
+            - --severity
+            - HIGH,CRITICAL
+            - --format
+            - table
+            - ${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${STAGING_TAG}
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: /root/.cache/trivy
+      volumes:
+        - name: trivy-cache
+          persistentVolumeClaim:
+            claimName: trivy-cache-pvc
+EOF
+                        kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/trivy-frontend-${BUILD_NUMBER}.yaml
+                    '''
+                    waitForJobCompletion('trivy-frontend-${BUILD_NUMBER}', 'cicd', 60)
+                }
+            }
+        }
+
+        // Option C promotion: re-point :BUILD_NUMBER and :latest at the
+        // already-scanned :staging-N manifest. `crane tag` is a registry-side
+        // operation — no re-upload, no rebuild.
+        stage('Push Validated Images to Nexus') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        set -e
+                        cat <<EOF > /tmp/crane-promote-${BUILD_NUMBER}.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: crane-promote-${BUILD_NUMBER}
+  namespace: cicd
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
+      containers:
+        - name: crane
+          image: gcr.io/go-containerregistry/crane:debug
+          env:
+            - name: NEXUS_USER
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: username }
+            - name: NEXUS_PASS
+              valueFrom:
+                secretKeyRef: { name: nexus-registry-creds, key: password }
+          command: ["/busybox/sh", "-c"]
+          args:
+            - |
+              set -e
+              crane auth login ${NEXUS_REGISTRY} --insecure -u "\$NEXUS_USER" -p "\$NEXUS_PASS"
+              crane tag --insecure ${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG} ${BUILD_NUMBER}
+              crane tag --insecure ${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG} latest
+              crane tag --insecure ${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${STAGING_TAG} ${BUILD_NUMBER}
+              crane tag --insecure ${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${STAGING_TAG} latest
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+EOF
+                        kubectl --kubeconfig=$KUBECONFIG apply -f /tmp/crane-promote-${BUILD_NUMBER}.yaml
+                    '''
+                    waitForJobCompletion('crane-promote-${BUILD_NUMBER}', 'cicd', 30)
                 }
             }
         }
@@ -252,11 +466,23 @@ EOF
                 }
             }
         }
+
+        stage('Verify Application') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        kubectl --kubeconfig=$KUBECONFIG get pods -n ehealth
+                        kubectl --kubeconfig=$KUBECONFIG get svc -n ehealth
+                        kubectl --kubeconfig=$KUBECONFIG get ingress -n ehealth
+                    '''
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo "Pipeline terminé — build ${BUILD_NUMBER} déployé sur Kubernetes"
+            echo "Pipeline complet — build ${BUILD_NUMBER} analysé, scanné, déployé et validé"
         }
         failure {
             echo "Pipeline échoué — vérifier les logs ci-dessus"
