@@ -96,13 +96,14 @@ pipeline {
             steps {
                 sh '''
                     set -e
+                    export PATH="/opt/tools/node/bin:$PATH"
                     cd FrontEnd
-                    /opt/tools/node/bin/npm ci
+                    npm ci
                     GENERATE_SOURCEMAP=false \
                     NODE_OPTIONS=--max-old-space-size=1536 \
                     REACT_APP_API_URL=${REACT_APP_API_URL} \
                     CI=false \
-                    /opt/tools/node/bin/npm run build
+                    npm run build
                 '''
             }
         }
@@ -111,8 +112,9 @@ pipeline {
             steps {
                 sh '''
                     set -e
+                    export PATH="/opt/tools/node/bin:$PATH"
                     cd Backend
-                    /opt/tools/node/bin/npm ci
+                    npm ci
                 '''
             }
         }
