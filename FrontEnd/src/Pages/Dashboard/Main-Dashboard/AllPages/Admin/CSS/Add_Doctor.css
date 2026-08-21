@@ -72,8 +72,6 @@ input::-webkit-inner-spin-button {
 }
 
 .addbutton {
-  display: flex;
-  justify-content: center;
   text-align: center;
   width: 15%;
   height: 2.8rem;
