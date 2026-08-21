@@ -526,7 +526,23 @@ spec:
           args:
             - |
               set -e
-              crane auth login ${NEXUS_REGISTRY} --insecure -u "\$NEXUS_USER" -p "\$NEXUS_PASS"
+              # TASK 5 FIX (caught live, 2026-08-21): the auth line below used
+              # to have only a single backslash before each shell variable.
+              # Groovy strips that backslash as its own escape sequence
+              # BEFORE bash ever sees this string (same mechanism that makes
+              # the KUBECONFIG references work correctly in
+              # waitForJobCompletion() above -- there it's fine, because
+              # KUBECONFIG really is set in that calling shell). Here it
+              # wasn't: with the backslash gone, bash's unquoted heredoc
+              # expanded the bare variables using the Jenkins agent's own
+              # shell env (never set there), baking empty strings into the
+              # generated YAML as -u "" -p "" -- hence crane's own
+              # "Error: username and password required". Doubling the
+              # backslash lets one literal backslash survive Groovy's parse,
+              # so bash's heredoc leaves the variable references literal in
+              # the YAML file, to be expanded later by the pod's OWN shell
+              # from its secretKeyRef env vars (NEXUS_USER / NEXUS_PASS).
+              crane auth login ${NEXUS_REGISTRY} --insecure -u "\\$NEXUS_USER" -p "\\$NEXUS_PASS"
               crane tag --insecure ${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG} ${BUILD_NUMBER}
               crane tag --insecure ${NEXUS_REGISTRY}/${BACKEND_IMAGE}:${STAGING_TAG} latest
               crane tag --insecure ${NEXUS_REGISTRY}/${FRONTEND_IMAGE}:${STAGING_TAG} ${BUILD_NUMBER}
