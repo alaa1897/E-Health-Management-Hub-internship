@@ -170,6 +170,28 @@ pipeline {
         // to just this shell step.
         stage('SonarQube Analysis') {
             steps {
+                // TASK 5 FIX (caught live, 2026-08-21): SonarQube is scaled
+                // 0->1 back in Checkout, and until this fix the ONLY thing
+                // giving it time to boot was however long Build Frontend +
+                // Build Backend happened to take. That's not a real wait —
+                // it's a coincidence. In one run those two stages together
+                // took only ~50s, nowhere near the ~2-3 minutes SonarQube's
+                // Elasticsearch needs after a cold scale-up (the
+                // startupProbe in sonarqube-deployment.yaml allows up to
+                // 300s for exactly this reason). The scan then hit
+                // SonarQube before it was accepting connections at all:
+                //   Failed to query server version ... failed: null
+                // Fix: block here with an explicit readiness wait
+                // (kubectl rollout status) before the scanner ever runs,
+                // the same way we already explicitly WAIT for SonarQube's
+                // pod to disappear on scale-down in Quality Gate below —
+                // don't assume timing, verify it.
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        set -e
+                        kubectl --kubeconfig=$KUBECONFIG rollout status deployment/sonarqube -n cicd --timeout=280s
+                    '''
+                }
                 withSonarQubeEnv('sonarqube') {
                     sh '''
                         set -e
