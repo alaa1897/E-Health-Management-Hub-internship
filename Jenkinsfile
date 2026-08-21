@@ -478,7 +478,13 @@ metadata:
   namespace: cicd
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 300
+  # Bumped from 300s -> 1800s (temporary, diagnostic): the crane Job failed
+  # immediately with "unable to retrieve container logs" (2026-08-21),
+  # meaning the container likely never started (bad entrypoint/command),
+  # not that it ran and errored. The pod got garbage-collected by its TTL
+  # before we could `kubectl describe` it. 30 minutes gives real time to
+  # inspect the next failure. Safe to revert to 300 once this is diagnosed.
+  ttlSecondsAfterFinished: 1800
   template:
     spec:
       restartPolicy: Never
