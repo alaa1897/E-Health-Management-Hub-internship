@@ -13,7 +13,12 @@ const reportRouter = require("./routes/Reports.Route");
 const app = express();
 const db = require("./configs/db");
 app.use(express.json());
-app.use(cors());
+// SonarQube security hotspot fix (javascript:S5122): cors() with no options
+// reflects *any* origin, letting any website's JS call this API using a
+// visitor's cookies/session. Restrict it to the real frontend origin
+// (defaults to the cluster's ehealth.local ingress host; override via
+// FRONTEND_URL for other environments).
+app.use(cors({ origin: process.env.FRONTEND_URL || "http://ehealth.local" }));
 
 app.get("/", (req, res) => {
   res.send("Healthcare System");

@@ -13,6 +13,7 @@ const { getPatientCredFromEmail } = require("../models/Patient.model");
 require("dotenv").config();
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 const router = express.Router();
 
 router.get("/", async (req, res) => {
@@ -96,7 +97,12 @@ router.patch("/:adminId", async (req, res) => {
 
 router.post("/verification", async (req, res) => {
   console.log(req.body);
-  const verificationCode = Math.floor(1000 + Math.random() * 9000);
+  // SonarQube security hotspot fix (javascript:S2245): Math.random() is not
+  // a cryptographically secure PRNG, which matters here because this value
+  // is an OTP-style verification code. crypto.randomInt is Node's built-in
+  // CSPRNG-backed integer generator — same range (1000-9999), no new
+  // dependency.
+  const verificationCode = crypto.randomInt(1000, 10000);
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: process.env.SMTP_PORT,
