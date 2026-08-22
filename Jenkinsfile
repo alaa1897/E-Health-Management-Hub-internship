@@ -359,9 +359,10 @@ EOF
         }
 
         // Piège 8 — Nexus is HTTP-only, Trivy needs --insecure + creds.
-        // Piège 9 — exit-code 0 for now (see Jenkinsfile comment below);
-        // flip to 1 --severity CRITICAL once you and your mentor have
-        // reviewed a baseline report together.
+        // Piège 9 — blocking gate active: --exit-code 1 --severity HIGH,CRITICAL.
+        // Baseline reviewed 2026-08-22 (build #87): backend + frontend both
+        // scan clean (0 findings) after the npm/Dockerfile hardening fixes,
+        // so this stage now fails the pipeline on any new HIGH/CRITICAL.
         stage('Security Scan — Trivy') {
             steps {
                 withCredentials([
@@ -409,7 +410,7 @@ spec:
             - image
             - --insecure
             - --exit-code
-            - "0"
+            - "1"
             - --severity
             - HIGH,CRITICAL
             - --format
@@ -460,7 +461,7 @@ spec:
             - image
             - --insecure
             - --exit-code
-            - "0"
+            - "1"
             - --severity
             - HIGH,CRITICAL
             - --format
